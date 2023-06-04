@@ -77,30 +77,32 @@ class DictZip {
 class Index {
     strcmp = strcmp
     // binary search
-    bisect(query, start = 0, end = this.idx.length) {
+    bisect(query, start = 0, end = this.words.length - 1) {
         if (end - start === 1) {
-            if (query === this.idx[start][0]) return start
-            if (query === this.idx[end][0]) return end
+            if (!this.strcmp(query, this.getWord(start))) return start
+            if (!this.strcmp(query, this.getWord(end))) return end
             return null
         }
         const mid = Math.floor(start + (end - start) / 2)
-        const word = this.idx[mid][0]
-        const cmp = this.strcmp(query, word)
-        if (cmp === -1) return this.bisect(query, start, mid)
-        if (cmp === 1) return this.bisect(query, mid, end)
+        const cmp = this.strcmp(query, this.getWord(mid))
+        if (cmp < 0) return this.bisect(query, start, mid)
+        if (cmp > 0) return this.bisect(query, mid, end)
         return mid
     }
     // check for multiple definitions
     checkAdjacent(query, i) {
         if (i == null) return []
         let j = i
-        while (!this.strcmp(query, this.idx[j - 1]?.[0])) j--
+        const equals = i => {
+            const word = this.getWord(i)
+            return word ? this.strcmp(query, word) === 0 : false
+        }
+        while (equals(j - 1)) j--
         let k = i
-        while (!this.strcmp(query, this.idx[k + 1]?.[0])) k++
-        return j === k ? [this.idx[i]] : this.idx.slice(j, k + 1)
+        while (equals(k + 1)) k++
+        return j === k ? [i] : Array.from({ length: k + 1 - j }, (_, i) => j + i)
     }
     lookup(query) {
-        if (!this.idx) return []
         return this.checkAdjacent(query, this.bisect(query))
     }
 }
@@ -121,13 +123,23 @@ const decodeBase64Number = str => {
 }
 
 class DictdIndex extends Index {
+    getWord(i) {
+        return this.words[i]
+    }
     async load(file) {
-        this.idx = decode(await file.arrayBuffer()).split('\n').map(line => {
-            const arr = line.split('\t')
-            arr[1] = decodeBase64Number(arr[1])
-            arr[2] = decodeBase64Number(arr[2])
+        const words = []
+        const offsets = []
+        const sizes = []
+        for (const line of decode(await file.arrayBuffer()).split('\n')) {
+            const a = line.split('\t')
+            words.push(a[0])
+            offsets.push(decodeBase64Number(a[1]))
+            sizes.push(decodeBase64Number(a[2]))
             return arr
-        })
+        }
+        this.words = words
+        this.offsets = offsets
+        this.sizes = sizes
     }
 }
 
@@ -138,7 +150,10 @@ export class DictdDict {
         this.#dict.inflate = inflate
         return this.#dict.load(file)
     }
-    #readWord([word, offset, size]) {
+    async #readWord(i) {
+        const word = this.#idx.getWord(i)
+        const offset = this.#idx.offsets[i]
+        const size = this.#idx.sizes[i]
         return { word, data: ['m', this.#dict.read(offset, size)] }
     }
     #readWords(arr) {
@@ -151,21 +166,35 @@ export class DictdDict {
 
 class StarDictIndex extends Index {
     isSyn
+    #arr
+    getWord(i) {
+        const word = this.words[i]
+        if (!word) return
+        return decode(this.#arr.subarray(word[0], word[1]))
+    }
     async load(file) {
         const { isSyn } = this
         const buf = await file.arrayBuffer()
         const arr = new Uint8Array(buf)
+        this.#arr = arr
         const view = new DataView(buf)
-        const idx = []
+        const words = []
+        const offsets = []
+        const sizes = []
         for (let i = 0; i < arr.length;) {
             const newI = arr.subarray(0, i + 256).indexOf(0, i)
             if (newI < 0) throw new Error('Word too big')
-            const word = decode(arr.subarray(i, newI))
-            const off = view.getUint32(newI + 1)
-            idx.push(isSyn ? [word, off] : [word, off, view.getUint32(newI + 5)])
-            i = newI + (isSyn ? 5 : 9)
+            words.push([i, newI])
+            offsets.push(view.getUint32(newI + 1))
+            if (isSyn) i = newI + 5
+            else {
+                sizes.push(view.getUint32(newI + 5))
+                i = newI + 9
+            }
         }
-        this.idx = idx
+        this.words = words
+        this.offsets = offsets
+        this.sizes = sizes
     }
 }
 
@@ -191,7 +220,10 @@ export class StarDict {
     loadSyn(file) {
         if (file) return this.#syn.load(file)
     }
-    async #readWord([word, offset, size]) {
+    async #readWord(i) {
+        const word = this.#idx.getWord(i)
+        const offset = this.#idx.offsets[i]
+        const size = this.#idx.sizes[i]
         const data = await this.#dict.read(offset, size)
         const seq = this.ifo.sametypesequence
         if (!seq) throw new Error('TODO')
@@ -205,6 +237,6 @@ export class StarDict {
         return this.#readWords(this.#idx.lookup(query))
     }
     synonyms(query) {
-        return this.#readWords(this.#syn.lookup(query).map(s => this.#idx.idx[s[1]]))
+        return this.#readWords(this.#syn.lookup(query).map(i => this.#syn.offsets[i]))
     }
 }
