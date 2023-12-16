@@ -1,3 +1,5 @@
+Moved to https://github.com/johnfactotum/foliate-js
+
 # dict-js
 
 A small JavaScript library for reading dictd and StarDict dictionaries.
